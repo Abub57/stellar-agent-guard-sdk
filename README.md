@@ -204,32 +204,26 @@ const middleware = createLangChainGuardMiddleware({
 
 ### Framework Middleware (LangChain & ElizaOS)
 
+When deploying fleets of hundreds or thousands of autonomous agents derived from identical templates or scheduled loops, fixed poll intervals (e.g. exactly every 5s) cause all instances to poll RPC nodes in lockstep phase. This creates synchronized traffic spikes (thundering herds) against public Soroban RPC endpoints, triggering aggressive HTTP 429 rate limits and cascade backpressure errors.
+
+`GuardTelemetryListener.watch()` defaults to `jitter: 'full'`, which uniformly randomizes each poll delay in `[intervalMs * (1 - j), intervalMs]` with `j = 0.2` (a 20% variance window). This breaks lockstep fleet synchronization while keeping polling responsive and bounded. Deterministic fixed interval cadence can be restored when needed by specifying `jitter: 'none'`.
+
 ```ts
-import {
-  createLangChainGuardMiddleware,
-  createGuardValidator,
-} from "stellar-agent-guard-sdk";
-
-// LangChain: intercept agent tool calls
-const middleware = createLangChainGuardMiddleware({
-  interceptor,
-  toContractCall: (request) => ({
-    contractId: request.args.token,
-    method: "transfer",
-    args: [request.args.from, request.args.to, request.args.amount],
-  }),
-});
-
-// ElizaOS: validate action before execution
-const validate = createGuardValidator({
-  interceptor,
-  toContractCall: (message) => ({
-    contractId: message.content.token,
-    method: "transfer",
-    args: [message.content.from, message.content.to, message.content.amount],
-  }),
-});
+// Follow event telemetry with full jitter (default)
+for await (const events of listener.watch({
+  pollIntervalMs: 5_000,
+  jitter: "full", // uniformly distributed in [4000ms, 5000ms]
+})) {
+  console.log(`Received ${events.length} guard event(s)`);
+}
 ```
+
+### Framework Middleware (LangChain & ElizaOS)
+
+Plug-and-play middleware intercepts agent actions before tools are executed:
+
+- **LangChain**: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses or the verdict is undetermined, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation. The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
+- **ElizaOS**: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused actions return boolean `false`, excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
 
 ## API Reference
 
@@ -275,8 +269,8 @@ formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
 - `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
 - `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
-- `isDeadManFrozen(status: AccountStatus | null, policy: GuardPolicy | null, nowSecs?: number): boolean`
-- `deadManRemaining(status: AccountStatus | null, policy: GuardPolicy | null, nowSecs?: number): number | null`
+- `isDeadManFrozen(status: GuardStatus): boolean`
+- `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
 
 ## Architecture
 

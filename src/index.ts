@@ -95,7 +95,9 @@ export {
 } from "./cost.ts";
 
 export {
+  DEFAULT_JITTER_FRACTION,
   GuardTelemetryListener,
+  computePollDelay,
   describeGuardEvent,
   diagnosticsToEvents,
   guardEventId,
@@ -107,17 +109,47 @@ export {
   type GuardEventIdentityInput,
   type GuardEventKind,
   type GuardTelemetryConfig,
+  type GuardTelemetryWatchParams,
+  type PollResult,
+  type TelemetryJitter,
 } from "./telemetry.ts";
 
 export {
   GUARD_STORAGE_KEYS,
+  INCLUSION_FEE,
+  SIG_EXPIRATION_LEDGERS,
+  assembleFromSimulation,
+  buildGuardAuthEntry,
+  buildInitialEnvelope,
+  describeSimulationResources,
+  describeSubmissionFailure,
+  describeTransactionResult,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   toAgentSigner,
+  type AdminSigner,
   type AgentSigner,
   type ContractCall,
+  type GuardCredentialType,
+  type SimulationOutcome,
   type SubmissionResult,
 } from "./tx.ts";
+
+export {
+  DEFAULT_NETWORK_PASSPHRASE,
+  agentPubkeyToScVal,
+  buildFreezeCall,
+  buildRotateAgentKeyCall,
+  buildSetPolicyCall,
+  buildUnfreezeCall,
+  submitFreeze,
+  submitRotateAgentKey,
+  submitSetPolicy,
+  submitUnfreeze,
+  type AdminOpParams,
+  type RotateAgentKeyParams,
+  type SetPolicyParams,
+} from "./admin.ts";
 
 // Framework adapters. Both are written structurally against their host's hook,
 // so neither framework is a dependency of this package.
@@ -135,3 +167,4 @@ export {
   type ElizaGuardOptions,
   type ElizaValidator,
 } from "./adapters/elizaos.ts";
+

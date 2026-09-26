@@ -29,6 +29,7 @@ import {
   signAccountAuthEntry,
   summarizeDiagnosticEvents,
   submitAndPoll,
+  type AdminSigner,
   type AgentSigner,
   type ContractCall,
   type SubmissionResult,
@@ -69,15 +70,17 @@ export type InvokeOutcome =
 export interface InvokeParams {
   server: rpc.Server;
   /** Classic account that pays the fee and supplies the sequence number. */
-  source: Keypair;
+  source: Keypair | AdminSigner;
   call: ContractCall;
   networkPassphrase: string;
   /** Present when the call requires the smart account's own authorization. */
-  guardAuth?: GuardAuthorization | null;
+  guardAuth?: GuardAuthorization | null | undefined;
   /** Extra classic-account authorizers available to sign (e.g. an admin). */
-  accountSigners?: Keypair[];
+  accountSigners?: Array<Keypair | AdminSigner> | undefined;
   /** Skip broadcast even if the enforced simulation passes (dry run). */
-  dryRun?: boolean;
+  dryRun?: boolean | undefined;
+  pollAttempts?: number | undefined;
+  pollIntervalMs?: number | undefined;
   /**
    * Optional, logger-agnostic observability hook: one `InvokeStepEvent` per
    * pipeline-stage attempt, covering probe → sign → simulate → broadcast,
@@ -86,7 +89,7 @@ export interface InvokeParams {
    * itself never logs and takes no logger dependency; what a consumer does
    * with the events is entirely the consumer's business.
    */
-  onStep?: (step: InvokeStepEvent) => void;
+  onStep?: ((step: InvokeStepEvent) => void) | undefined;
 }
 
 /**
@@ -352,12 +355,13 @@ async function invokePipeline(params: InvokeParams, attempt: number): Promise<In
   }
 
   // ── Step 4: assemble real resources, sign the envelope, broadcast ─────
+  const sourcePubKey = await params.source.publicKey();
   const assembled = assembleFromSimulation({
     simulation: enforced.simulation,
     // A fresh `Account` per build: `TransactionBuilder` advances the sequence of
     // the instance it is handed, so sharing one across builds silently produces
     // `tx_bad_seq`.
-    source: new Account(params.source.publicKey(), enforced.nextSeq),
+    source: new Account(sourcePubKey, enforced.nextSeq),
     operation: enforced.operation,
     networkPassphrase: params.networkPassphrase,
     guard: params.guardAuth?.guard ?? null,
@@ -366,7 +370,11 @@ async function invokePipeline(params: InvokeParams, attempt: number): Promise<In
   const submission = await withStepTiming(
     params.onStep,
     { name: "broadcast", attempt },
-    () => submitAndPoll(server, assembled.transaction, [params.source]),
+    () =>
+      submitAndPoll(server, assembled.transaction, [params.source], {
+        pollAttempts: params.pollAttempts,
+        pollIntervalMs: params.pollIntervalMs,
+      }),
     (result) => result.failure !== null,
   );
   if (submission.failure) {
@@ -403,7 +411,8 @@ export async function enforceCall(
     args: call.args,
   });
 
-  const sourceAccount = await server.getAccount(source.publicKey());
+  const sourcePubKey = await source.publicKey();
+  const sourceAccount = await server.getAccount(sourcePubKey);
   const latest = await server.getLatestLedger();
   const expiration = latest.sequence + SIG_EXPIRATION_LEDGERS;
   // `TransactionBuilder` advances the sequence of the `Account` it is handed,
@@ -411,7 +420,7 @@ export async function enforceCall(
   // base sequence. Sharing one would silently build the second transaction on
   // sequence N+2 and the network would reject it with `tx_bad_seq`.
   const nextSeq = sourceAccount.sequenceNumber();
-  const freshAccount = () => new Account(source.publicKey(), nextSeq);
+  const freshAccount = () => new Account(sourcePubKey, nextSeq);
 
   // ── Step 1: discover required authorizations ──────────────────────────
   const probe = buildInitialEnvelope({
@@ -507,11 +516,19 @@ export async function enforceCall(
         continue;
       }
 
-      const signer = (params.accountSigners ?? []).find((kp) => kp.publicKey() === address);
+      let signer: Keypair | AdminSigner | undefined;
+      const suppliedPubkeys: string[] = [];
+      for (const s of params.accountSigners ?? []) {
+        const pubkey = await s.publicKey();
+        suppliedPubkeys.push(pubkey);
+        if (pubkey === address) {
+          signer = s;
+        }
+      }
       if (!signer) {
         throw new SigningStageError(
           `call requires authorization from ${address}, but no matching key was provided ` +
-            `(supplied: ${(params.accountSigners ?? []).map((kp) => kp.publicKey()).join(", ") || "none"})`,
+            `(supplied: ${suppliedPubkeys.join(", ") || "none"})`,
         );
       }
       signedAuth.push(
