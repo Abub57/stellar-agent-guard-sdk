@@ -115,18 +115,27 @@ committable); never commit the filled-in copy.
 
 ```ts
 import { Keypair, rpc } from "@stellar/stellar-sdk";
-import { PreFlightInterceptor } from "stellar-agent-guard-sdk";
+import { PreFlightInterceptor, isContractAddress, type ContractAddress } from "stellar-agent-guard-sdk";
+
+// Validate contract address from environment
+const guardAddress = process.env.GUARD_ADDRESS;
+if (!isContractAddress(guardAddress)) {
+  throw new Error(`Invalid guard contract address: ${guardAddress}`);
+}
+
+// For known hardcoded addresses, use type assertion
+const contractAddress = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB" as ContractAddress;
 
 const interceptor = new PreFlightInterceptor({
   server: new rpc.Server("https://soroban-testnet.stellar.org"),
   networkPassphrase: "Test SDF Network ; September 2015",
-  guard: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+  guard: guardAddress, // Type-safe: validated as ContractAddress
   agent: Keypair.fromSecret(process.env.AGENT_SECRET!),
   source: Keypair.fromSecret(process.env.SOURCE_SECRET!),
 });
 
 const decision = await interceptor.check({
-  contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+  contract: contractAddress,
   fn: "transfer",
   args: [/* from, to, amount */],
 });
@@ -139,6 +148,28 @@ if (decision.kind === "admissible") {
   console.log("Undetermined (fails closed)");
 }
 ```
+
+#### Branded Address Types (v0.2.0+)
+
+This version introduces **branded types** to distinguish contract addresses (C...) from account addresses (G...) at compile time, preventing a common source of bugs where an address is used in the wrong context.
+
+**Type Guards:**
+
+```ts
+import { 
+  isContractAddress,    // Validates C... addresses
+  isAccountAddress,     // Validates G... addresses
+  isStrKeyAddress,      // Validates any StrKey (C... or G...)
+  isPublicKeyHex,       // Validates 64-char hex public keys
+} from "stellar-agent-guard-sdk";
+
+// Runtime validation before use
+if (!isContractAddress(userInput)) {
+  throw new Error("Expected contract address (C...)");
+}
+```
+
+**Migration:** If upgrading from an earlier version, see [MIGRATION.md](./MIGRATION.md) for guidance on updating your code to use typed addresses.
 
 #### Throw vs. Verdict Contract
 
@@ -186,6 +217,46 @@ window can change after a simulation while a cached result is still being
 reused, so callers that cannot tolerate that tradeoff should leave caching off,
 use a shorter TTL, provide a policy revision, and invalidate after policy or
 account-state changes.
+
+### Deterministic time control in tests (Clock injection)
+
+Time-dependent operations (cache TTL, transaction polling) support optional `Clock` injection for deterministic testing without real delays.
+
+**For tests**, use `FakeClock` to control time:
+
+```ts
+import { FakeClock, PreFlightInterceptor } from "stellar-agent-guard-sdk";
+
+test("cache entry expires", async () => {
+  const clock = new FakeClock(0);
+  const interceptor = new PreFlightInterceptor({
+    server,
+    guard,
+    agent,
+    source,
+    cache: { ttlMs: 5000 },
+    clock, // Inject the fake clock
+  });
+
+  const decision1 = await interceptor.check(call);
+
+  // Advance clock without real delays
+  clock.advance(6000); // Skip to t=6000ms (past the 5000ms TTL)
+
+  const decision2 = await interceptor.check(call); // Cache expired, fresh lookup
+});
+```
+
+**For production**, no action is needed: modules default to the system clock. The `Clock` interface is purely optional and for testing.
+
+Key methods on `FakeClock`:
+
+- `now()` — returns current time in milliseconds
+- `sleep(ms)` — returns a promise (resolves instantly when time allows)
+- `advance(ms)` — move the clock forward deterministically
+- `setTime(ms)` — set clock to an absolute time
+
+Time-dependent modules (preflight cache, transaction polling) accept an optional `clock` parameter. When omitted, they use the system clock (`Date.now()`, real `setTimeout`). Tests pass a `FakeClock` to eliminate real waits and make timing deterministic. For full guidance, see [CONTRIBUTING.md](CONTRIBUTING.md) under "Deterministic time control in tests".
 
 ### Pipeline step observability (`onStep`)
 
