@@ -52,4 +52,4 @@ jobs:
         with:
           fail-on-severity: high
           # Reviewed and accepted advisories go here as GHSA ids. Empty today.
-          allow-ghsas: ""
+          allow-ghsas: []
