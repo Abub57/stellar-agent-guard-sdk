@@ -35,6 +35,7 @@ import { createHash } from "node:crypto";
 import { rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, normalizeEventData, type GuardAuthDecision } from "./events.ts";
 import { topicSymbols } from "./invoke.ts";
+import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
 
 /** The event name topics this SDK knows how to interpret. */
 const KNOWN_TOPICS = new Set<string>(Object.values(GUARD_EVENT_TOPICS));
@@ -512,6 +513,14 @@ export interface GuardTelemetryConfig {
   /** RPC URL, only used for error messages. */
   rpcUrl?: string;
   /**
+   * Optional log sink for this listener's diagnostics: a summary of every page
+   * received (with how many events were dropped as unrecognised), a coverage
+   * gap, and a poll that failed or was aborted.
+   *
+   * Omitted — the default — the listener says nothing at all.
+   */
+  logger?: GuardLoggerInput | undefined;
+  /**
    * Opt-in: retain the most recent events for `recent()` snapshots (issue #68).
    * Omitted → no buffer is allocated and `recent()` always returns `[]`.
    */
@@ -887,6 +896,8 @@ export async function* mergeGuardEventStreams(
 
 export class GuardTelemetryListener {
   private readonly config: GuardTelemetryConfig;
+  private readonly logger: GuardLogger;
+
   /**
    * Null unless `config.buffer` is set: with no buffer requested, there is no
    * structure to allocate and every `recent()` call short-circuits (issue #68).
@@ -920,6 +931,7 @@ export class GuardTelemetryListener {
 
   constructor(config: GuardTelemetryConfig) {
     this.config = config;
+    this.logger = resolveLogger(config.logger);
     this.buffer = config.buffer ? new GuardEventRingBuffer(config.buffer.max) : null;
   }
 
@@ -1058,6 +1070,11 @@ export class GuardTelemetryListener {
 
     const response = await this.config.server.getEvents(request);
     const events: GuardEvent[] = [];
+    // Kept rather than merely skipped: an event this listener cannot interpret
+    // is a coverage fact a host may need to see, and counting it is the only
+    // way to tell "the guard was quiet" from "the guard spoke in a vocabulary
+    // this SDK version does not know".
+    let dropped = 0;
     for (const event of response.events) {
       const contractId = event.contractId ? String(event.contractId) : null;
       const decoded = interpret(
@@ -1076,7 +1093,16 @@ export class GuardTelemetryListener {
         },
       );
       if (decoded) events.push(decoded);
+      else dropped += 1;
     }
+    const oldestLedger = typeof response.oldestLedger === "number" ? response.oldestLedger : null;
+    this.logger.debug("telemetry page received", {
+      guard: this.config.guard,
+      events: events.length,
+      dropped,
+      latestLedger: response.latestLedger,
+      oldestLedger,
+    });
     this.record(events);
     return {
       events,
@@ -1084,7 +1110,7 @@ export class GuardTelemetryListener {
       latestLedger: response.latestLedger,
       // Best-effort: a host that omits the retention boundary gets no gap
       // detection, rather than a boundary invented from `latestLedger`.
-      oldestLedger: typeof response.oldestLedger === "number" ? response.oldestLedger : null,
+      oldestLedger,
     };
   }
 
@@ -1158,7 +1184,12 @@ export class GuardTelemetryListener {
         // rejection of the request it arrived during. That is teardown, not a
         // telemetry failure: end the stream quietly instead of throwing at the
         // `for await` consumer or leaving an unhandled rejection behind.
-        if (signal?.aborted) return;
+        if (signal?.aborted) {
+          this.logger.debug("telemetry watch aborted with a request in flight", {
+            guard: this.config.guard,
+          });
+          return;
+        }
         // Bounded retry with backoff, then a fail-visible end: call
         // `onStreamError` once with the terminal error and complete the
         // iterator normally. A callback that throws propagates (the consumer
@@ -1185,6 +1216,10 @@ export class GuardTelemetryListener {
           }
         }
         if (recovered === null) {
+          this.logger.warn(
+            `telemetry poll failed: ${terminal instanceof Error ? terminal.message : String(terminal)}`,
+            { guard: this.config.guard },
+          );
           this.lastError = terminal;
           if (params.onStreamError) params.onStreamError(terminal);
           return;
@@ -1230,6 +1265,13 @@ export class GuardTelemetryListener {
           retainedFromLedger: page.oldestLedger,
           retainedToLedger: page.latestLedger,
         };
+        // Also reported through the logger, because `onGap` is only wired when a
+        // caller supplies it and a pruned range is worth seeing in a log even
+        // for a listener that did not ask for a callback.
+        this.logger.warn(
+          `telemetry coverage gap: ledgers ${gap.fromLedger}-${gap.toLedger} are no longer retained by the RPC`,
+          { ...gap, guard: this.config.guard },
+        );
         try {
           params.onGap(gap);
         } catch {
